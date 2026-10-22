@@ -20,6 +20,7 @@ export interface FolderScanResult {
   items: NativeMediaFile[];
   activeIndex: number;
   folder?: string;
+  folderConfig?: import('./types').IntroOutroConfig | null;
 }
 
 export interface AssociationResult {
@@ -71,6 +72,8 @@ export interface ElectronAPI {
   getPathForFile: (file: File) => string;
   getInitialMedia: () => Promise<FolderScanResult | NativeMediaFile | null>;
   scanFolderMedia: (filePath: string) => Promise<FolderScanResult | null>;
+  loadFolderIntroOutro: (folderOrFilePath: string) => Promise<import('./types').IntroOutroConfig | null>;
+  saveFolderIntroOutro: (folderOrFilePath: string, data: import('./types').IntroOutroConfig) => Promise<{ ok: boolean; path?: string; error?: string }>;
   onCliOpenFile: (callback: (fileItem: FolderScanResult | NativeMediaFile) => void) => () => void;
   registerAssociations: (customExe?: string) => Promise<AssociationResult>;
   unregisterAssociations: () => Promise<AssociationResult>;

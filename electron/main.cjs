@@ -211,6 +211,27 @@ function buildMediaItem(filePath, isTarget = false) {
   };
 }
 
+function readFolderIntroOutroSync(dirPath) {
+  if (!dirPath || typeof dirPath !== 'string') return null;
+  try {
+    const candidates = [
+      path.join(dirPath, 'zmt.config.json'),
+      path.join(dirPath, '.zmt.config.json'),
+      path.join(dirPath, 'zmt_intro_outro.json'),
+      path.join(dirPath, '.zmt_intro_outro.json'),
+    ];
+    for (const targetFile of candidates) {
+      if (fs.existsSync(targetFile)) {
+        const content = fs.readFileSync(targetFile, 'utf-8');
+        return JSON.parse(content);
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to read folder config:', dirPath, err);
+  }
+  return null;
+}
+
 function scanFolderMedia(targetFilePath) {
   if (!targetFilePath) return null;
   try {
@@ -245,6 +266,7 @@ function scanFolderMedia(targetFilePath) {
         items: [buildMediaItem(targetResolved, true)],
         activeIndex: 0,
         folder: dir,
+        folderConfig: readFolderIntroOutroSync(dir),
       };
     }
 
@@ -275,10 +297,13 @@ function scanFolderMedia(targetFilePath) {
       activeIndex = 0;
     }
 
+    const folderConfig = readFolderIntroOutroSync(dir);
+
     return {
       items,
       activeIndex,
       folder: dir,
+      folderConfig,
     };
   } catch (err) {
     console.error('scanFolderMedia failed:', err);
@@ -591,6 +616,56 @@ ipcMain.handle('read-file-text', async (_event, filePath) => {
   } catch (e) {
     console.error('read-file-text failed:', e);
     throw e;
+  }
+});
+
+// Folder intro/outro storage IPC handlers (saves data locally in zmt.config.json per folder)
+ipcMain.handle('load-folder-intro-outro', async (_event, targetPath) => {
+  if (!targetPath || typeof targetPath !== 'string') return null;
+  try {
+    const resolved = path.resolve(targetPath);
+    let dir = resolved;
+    if (fs.existsSync(resolved)) {
+      const stat = fs.statSync(resolved);
+      if (stat.isFile()) {
+        dir = path.dirname(resolved);
+      }
+    } else {
+      dir = path.dirname(resolved);
+    }
+    return readFolderIntroOutroSync(dir);
+  } catch (e) {
+    console.error('load-folder-intro-outro failed:', e);
+    return null;
+  }
+});
+
+ipcMain.handle('save-folder-intro-outro', async (_event, targetPath, data) => {
+  if (!targetPath || typeof targetPath !== 'string' || !data) {
+    return { ok: false, error: 'invalid-arguments' };
+  }
+  try {
+    const resolved = path.resolve(targetPath);
+    let dir = resolved;
+    if (fs.existsSync(resolved)) {
+      const stat = fs.statSync(resolved);
+      if (stat.isFile()) {
+        dir = path.dirname(resolved);
+      }
+    } else {
+      if (path.extname(resolved)) {
+        dir = path.dirname(resolved);
+      }
+    }
+    if (!fs.existsSync(dir)) {
+      await fs.promises.mkdir(dir, { recursive: true });
+    }
+    const filePath = path.join(dir, 'zmt.config.json');
+    await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
+    return { ok: true, path: filePath };
+  } catch (e) {
+    console.error('save-folder-intro-outro failed:', e);
+    return { ok: false, error: String(e.message || e) };
   }
 });
 

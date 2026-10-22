@@ -6,7 +6,8 @@ import {
   parseVTT,
   parseASS,
   parseSubtitleFile,
-  cleanSubtitleText
+  cleanSubtitleText,
+  detectCuePosition
 } from './subtitleParser';
 
 describe('formatTime', () => {
@@ -51,6 +52,42 @@ describe('parseTimestampToSeconds', () => {
   });
 });
 
+describe('detectCuePosition', () => {
+  it('detects ASS/SSA top alignment tags like {\\an8} and legacy {\\a6}', () => {
+    expect(detectCuePosition('{\\an8}Teks atas')).toBe('top');
+    expect(detectCuePosition('{\\an7}Teks pojok atas kiri')).toBe('top');
+    expect(detectCuePosition('{\\an9}Teks pojok atas kanan')).toBe('top');
+    expect(detectCuePosition('{\\a6}Legacy SSA top')).toBe('top');
+    expect(detectCuePosition('{\\fs20\\an8}Combined ASS tag')).toBe('top');
+    expect(detectCuePosition('{\\an8\\b1}Combined ASS tag')).toBe('top');
+    expect(detectCuePosition('{\\pos(640,50)\\c&HFFFFFF&}Position top')).toBe('top');
+  });
+
+  it('detects ASS bottom alignment tags like {\\an2} and legacy {\\a2}', () => {
+    expect(detectCuePosition('{\\an2}Teks bawah')).toBe('bottom');
+    expect(detectCuePosition('{\\a2}Legacy SSA bottom')).toBe('bottom');
+  });
+
+  it('detects WebVTT cue settings on the timeline', () => {
+    expect(detectCuePosition('Subtitle', '00:01.000 --> 00:04.000 line:10%')).toBe('top');
+    expect(detectCuePosition('Subtitle', '00:01.000 --> 00:04.000 line:0%')).toBe('top');
+    expect(detectCuePosition('Subtitle', '00:01.000 --> 00:04.000 line:90%')).toBe('bottom');
+  });
+
+  it('detects ASS style table alignment and style names', () => {
+    expect(detectCuePosition('Dialogue', undefined, 8, 'Default')).toBe('top');
+    expect(detectCuePosition('Dialogue', undefined, 2, 'Default')).toBe('bottom');
+    expect(detectCuePosition('Dialogue', undefined, undefined, 'Sign_Header')).toBe('top');
+    expect(detectCuePosition('Dialogue', undefined, undefined, 'TL_Note')).toBe('top');
+  });
+
+  it('detects bracketed sign or explanation prefixes', () => {
+    expect(detectCuePosition('[Papan Nama: Rumah Sakit]')).toBe('top');
+    expect(detectCuePosition('【Toko Serba Ada】')).toBe('top');
+    expect(detectCuePosition('Catatan: Ini adalah istilah kuno')).toBe('top');
+  });
+});
+
 describe('parseSRT', () => {
   it('parses standard SRT blocks with index numbers and formatting tags', () => {
     const srt = `1
@@ -70,6 +107,24 @@ describe('parseSRT', () => {
     expect(cues[1].startTime).toBeCloseTo(5.2);
     expect(cues[1].endTime).toBeCloseTo(8.0);
     expect(cues[1].text).toBe('Second subtitle line');
+  });
+
+  it('parses parallel overlapping SRT cues with top and bottom positioning', () => {
+    const srt = `1
+00:00:10,000 --> 00:00:15,000
+{\\an8}[Papan Nama: Rumah Sakit Tokyo]
+
+2
+00:00:10,500 --> 00:00:14,000
+Cepat, kita harus bawa dia ke dalam!`;
+
+    const cues = parseSRT(srt);
+    expect(cues).toHaveLength(2);
+    expect(cues[0].text).toBe('[Papan Nama: Rumah Sakit Tokyo]');
+    expect(cues[0].position).toBe('top');
+
+    expect(cues[1].text).toBe('Cepat, kita harus bawa dia ke dalam!');
+    expect(cues[1].position).toBeUndefined(); // defaults to bottom
   });
 
   it('handles trailing coordinates and multi-line dialogue', () => {
@@ -112,27 +167,29 @@ Enjoy HD video playback`;
     expect(cues[1].text).toBe('Enjoy HD video playback');
   });
 
-  it('handles cue identifiers and cue settings in WebVTT', () => {
+  it('parses parallel WebVTT cues with line positioning', () => {
     const vtt = `WEBVTT - Demo
 
-cue-1
-00:01:00.000 --> 00:01:05.000 align:center size:50%
-First line of speech
+cue-top
+00:01:00.000 --> 00:01:05.000 line:0%
+Sign translation at top
 
-cue-2
-00:01:10.000 --> 00:01:15.000 line:10%
-Second line of speech`;
+cue-bottom
+00:01:00.000 --> 00:01:05.000 line:90%
+Dialogue speech at bottom`;
 
     const cues = parseVTT(vtt);
     expect(cues).toHaveLength(2);
-    expect(cues[0].startTime).toBeCloseTo(60.0);
-    expect(cues[0].endTime).toBeCloseTo(65.0);
-    expect(cues[0].text).toBe('First line of speech');
+    expect(cues[0].text).toBe('Sign translation at top');
+    expect(cues[0].position).toBe('top');
+
+    expect(cues[1].text).toBe('Dialogue speech at bottom');
+    expect(cues[1].position).toBe('bottom');
   });
 });
 
 describe('parseASS', () => {
-  it('parses ASS dialogue lines and strips {\\an8} styling tags', () => {
+  it('parses ASS dialogue lines and extracts {\\an8} styling tags as top position', () => {
     const ass = `[Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 Dialogue: 0,0:01:05.50,0:01:10.20,Default,,0,0,0,,{\\an8}High Definition Subtitle\\NSecond Line`;
@@ -142,6 +199,27 @@ Dialogue: 0,0:01:05.50,0:01:10.20,Default,,0,0,0,,{\\an8}High Definition Subtitl
     expect(cues[0].startTime).toBeCloseTo(65.5);
     expect(cues[0].endTime).toBeCloseTo(70.2);
     expect(cues[0].text).toBe('High Definition Subtitle\nSecond Line');
+    expect(cues[0].position).toBe('top');
+  });
+
+  it('parses parallel ASS cues with Style table alignments', () => {
+    const ass = `[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+Style: Sign,Arial,18,&H00FFFF00,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,8,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:02:00.00,0:02:05.00,Sign,,0,0,0,,Stasiun Shibuya
+Dialogue: 0,0:02:00.50,0:02:04.00,Default,,0,0,0,,Kereta berikutnya akan segera tiba.`;
+
+    const cues = parseASS(ass);
+    expect(cues).toHaveLength(2);
+    expect(cues[0].text).toBe('Stasiun Shibuya');
+    expect(cues[0].position).toBe('top');
+
+    expect(cues[1].text).toBe('Kereta berikutnya akan segera tiba.');
+    expect(cues[1].position).toBe('bottom');
   });
 
   it('preserves commas within the ASS dialogue text itself', () => {

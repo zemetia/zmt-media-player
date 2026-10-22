@@ -31,6 +31,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   getInitialMedia: () => ipcRenderer.invoke('get-initial-media'),
   scanFolderMedia: (filePath) => ipcRenderer.invoke('scan-folder-media', filePath),
+  loadFolderIntroOutro: (targetPath) => ipcRenderer.invoke('load-folder-intro-outro', targetPath),
+  saveFolderIntroOutro: (targetPath, data) => ipcRenderer.invoke('save-folder-intro-outro', targetPath, data),
   onCliOpenFile: (callback) => {
     const handler = (_event, fileItem) => callback(fileItem);
     ipcRenderer.on('cli-open-file', handler);

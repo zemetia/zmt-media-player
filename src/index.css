@@ -33,3 +33,12 @@
 input[type=range] {
   accent-color: #06b6d4;
 }
+
+/* Fullscreen cursor auto-hide */
+.hide-cursor,
+.hide-cursor *,
+.hide-cursor *::before,
+.hide-cursor *::after {
+  cursor: none !important;
+}
+

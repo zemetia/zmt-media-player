@@ -17,7 +17,7 @@ import { StudioSettingsModal, SettingsTabId } from './components/StudioSettingsM
 import { PlaylistDrawer } from './components/PlaylistDrawer';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { IntroOutroModal } from './components/IntroOutroModal';
-import { getIntroOutroConfigForTrack, hasIntroOutroSetup } from './utils/introOutroStorage';
+import { getIntroOutroConfigForTrack, hasIntroOutroSetup, registerFolderConfig } from './utils/introOutroStorage';
 import { parseSubtitleFile, formatTime } from './utils/subtitleParser';
 import {
   Sliders,
@@ -53,7 +53,7 @@ export const App: React.FC = () => {
     backgroundColor: '#000000',
     backgroundOpacity: 0.65,
     position: 'bottom',
-    offsetY: 0,
+    offsetY: 20, // default comfortable bottom padding (px)
     textShadow: true,
     textOutline: 'medium',
     offsetSeconds: 0,
@@ -180,8 +180,19 @@ export const App: React.FC = () => {
     if (currentTrack) {
       const cfg = getIntroOutroConfigForTrack(currentTrack, duration);
       setIntroOutroConfig(cfg);
+
+      // Also ensure folder-level intro/outro is loaded from disk if available
+      if (currentTrack.filePath && window.electronAPI?.loadFolderIntroOutro) {
+        window.electronAPI.loadFolderIntroOutro(currentTrack.filePath).then((folderCfg) => {
+          if (folderCfg) {
+            registerFolderConfig(currentTrack.filePath!, folderCfg);
+            const reloaded = getIntroOutroConfigForTrack(currentTrack, duration);
+            setIntroOutroConfig(reloaded);
+          }
+        });
+      }
     }
-  }, [currentTrack?.id, duration]);
+  }, [currentTrack?.id, currentTrack?.filePath, duration]);
 
   // Asynchronously probe & enrich embedded subtitles for the current active track
   useEffect(() => {
@@ -385,6 +396,13 @@ export const App: React.FC = () => {
 
   // Handler: Load folder scan or external media files (natural sorted folder playlist)
   const handleLoadExternalMedia = useCallback((payload: import('./electron').FolderScanResult | import('./electron').NativeMediaFile) => {
+    if ('folderConfig' in payload && payload.folderConfig) {
+      const folderKey = payload.folder || (payload.items && payload.items[0]?.path);
+      if (folderKey) {
+        registerFolderConfig(folderKey, payload.folderConfig);
+      }
+    }
+
     const rawItems: import('./electron').NativeMediaFile[] = ('items' in payload && Array.isArray(payload.items))
       ? payload.items
       : [payload as import('./electron').NativeMediaFile];

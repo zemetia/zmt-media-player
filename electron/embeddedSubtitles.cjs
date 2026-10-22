@@ -218,10 +218,11 @@ async function extractWithFfmpeg(filePath) {
 
     const results = [];
 
-    // 2. Extract each subtitle stream to WebVTT
+    // 2. Extract each subtitle stream (preserving native ASS/SSA styles & tags if available)
     for (let i = 0; i < streams.length; i++) {
       const stream = streams[i];
       const streamIndex = stream.index;
+      const codec = (stream.codec_name || '').toLowerCase();
       const lang = (stream.tags?.language || 'und').toLowerCase();
       const langName = getLanguageDisplayName(lang);
       const streamTitle = stream.tags?.title || stream.tags?.handler_name;
@@ -230,23 +231,25 @@ async function extractWithFfmpeg(filePath) {
         : `${langName} [Embedded #${i + 1}]`;
 
       try {
-        const { stdout: vttContent } = await execFileAsync(binaries.ffmpeg, [
-          '-y',
-          '-v', 'error',
-          '-i', filePath,
-          '-map', `0:${streamIndex}`,
-          '-f', 'webvtt',
-          '-',
-        ], { timeout: 30000, maxBuffer: 50 * 1024 * 1024 });
+        const isAss = codec === 'ass' || codec === 'ssa';
+        const isSrt = codec === 'subrip' || codec === 'srt';
+        const ext = isAss ? 'ass' : isSrt ? 'srt' : 'vtt';
+        const ffmpegArgs = isAss
+          ? ['-y', '-v', 'error', '-i', filePath, '-map', `0:${streamIndex}`, '-c:s', 'copy', '-f', 'ass', '-']
+          : isSrt
+          ? ['-y', '-v', 'error', '-i', filePath, '-map', `0:${streamIndex}`, '-c:s', 'copy', '-f', 'srt', '-']
+          : ['-y', '-v', 'error', '-i', filePath, '-map', `0:${streamIndex}`, '-f', 'webvtt', '-'];
 
-        if (vttContent && vttContent.includes('-->')) {
+        const { stdout: subContent } = await execFileAsync(binaries.ffmpeg, ffmpegArgs, { timeout: 30000, maxBuffer: 50 * 1024 * 1024 });
+
+        if (subContent && (subContent.includes('-->') || subContent.includes('[Events]') || subContent.includes('WEBVTT'))) {
           results.push({
             id: `embedded-${streamIndex}-${lang}-${i}`,
-            name: `${label}.vtt`,
+            name: `${label}.${ext}`,
             label,
             language: lang,
             path: filePath,
-            content: vttContent,
+            content: subContent,
             isEmbedded: true,
           });
         }

@@ -466,6 +466,46 @@ export const SubtitleModal: React.FC<SubtitleModalProps> = ({
                 </div>
               </div>
 
+              {/* Bottom Padding / Offset Y */}
+              <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                <div className="flex justify-between items-center text-xs font-semibold text-slate-300">
+                  <span>Jarak Bawah / Bottom Padding (Offset Y)</span>
+                  <span className="text-cyan-400 font-mono">+{subtitleStyle.offsetY || 0}px</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="2"
+                  value={subtitleStyle.offsetY || 0}
+                  onChange={(e) => setSubtitleStyle(prev => ({ ...prev, offsetY: parseInt(e.target.value, 10) }))}
+                  className="w-full accent-cyan-400 h-2 bg-slate-800 rounded-lg cursor-pointer"
+                />
+                <div className="flex gap-1.5 pt-0.5">
+                  {[
+                    { label: '0px', val: 0 },
+                    { label: 'Standar (20px)', val: 20 },
+                    { label: 'Tinggi (40px)', val: 40 },
+                    { label: 'Ekstra (70px)', val: 70 },
+                  ].map(p => (
+                    <button
+                      key={p.val}
+                      onClick={() => setSubtitleStyle(prev => ({ ...prev, offsetY: p.val }))}
+                      className={`flex-1 py-1 text-[10px] rounded border transition ${
+                        (subtitleStyle.offsetY || 0) === p.val
+                          ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/60 font-semibold'
+                          : 'bg-slate-800/80 text-slate-400 border-slate-700/60 hover:text-white'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-slate-400">
+                  Memberikan ruang/jarak ekstra di bagian bawah layar agar subtitle tidak bertabrakan dengan subtitle atas/bawah atau timeline.
+                </p>
+              </div>
+
               {/* Text Shadow & Background Box Style */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
@@ -560,6 +600,11 @@ export const SubtitleModal: React.FC<SubtitleModalProps> = ({
                           }`}
                         >
                           <div className="flex-1">
+                            {cue.position === 'top' && (
+                              <span className="inline-block text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 mb-1 mr-1.5">
+                                Atas / Sign
+                              </span>
+                            )}
                             <p className="text-xs font-medium leading-relaxed whitespace-pre-line">{cue.text}</p>
                           </div>
                           <span className={`text-[11px] font-mono whitespace-nowrap px-2 py-0.5 rounded ${

@@ -3,6 +3,7 @@ export interface SubtitleCue {
   startTime: number; // in seconds
   endTime: number;   // in seconds
   text: string;
+  position?: SubtitlePosition;
 }
 
 export interface SubtitleTrack {
@@ -117,6 +118,20 @@ export interface SignatureFrame {
 }
 
 /**
+ * Single pattern/variant for an Intro (OP) or Outro (ED).
+ * Supports multiple OPs / EDs in a series (e.g. OP1 for eps 1-12, OP2 for eps 13-24).
+ */
+export interface IntroOutroPattern {
+  id: string;
+  label: string;
+  kind: 'intro' | 'outro';
+  duration: number; // in seconds (default 90s)
+  sensitivity: number; // 50 to 95 (%) (default 75)
+  image?: VisualFingerprint;
+  signature?: FrameSignature;
+}
+
+/**
  * Multi-frame "fingerprint" of a whole intro/outro. Lets the scanner recognise the segment from a
  * single probe anywhere inside it (instead of needing to land on its exact first frame).
  */
@@ -137,6 +152,8 @@ export interface DetectedMarker {
   introEnd?: number;
   outroStart?: number;
   outroEnd?: number;
+  introPatternId?: string; // id of IntroOutroPattern that matched (e.g. 'intro-1', 'intro-2')
+  outroPatternId?: string; // id of IntroOutroPattern that matched (e.g. 'outro-1', 'outro-2')
   duration?: number;       // episode duration when detected (lets outro priors be anchored to the end)
   introMissing?: boolean;  // full scan finished and this episode has no intro
   outroMissing?: boolean;  // full scan finished and this episode has no outro
@@ -147,8 +164,13 @@ export interface IntroOutroConfig {
   id: string; // unique identifier (file hash/path, trackId, or series key)
   mediaTitle?: string;
   seriesTitle?: string;
+  folderPath?: string; // local directory path when saved per folder
   enabled: boolean;
   
+  // Multiple Intro & Outro Patterns (e.g. OP 1, OP 2, ED 1, ED 2)
+  intros?: IntroOutroPattern[];
+  outros?: IntroOutroPattern[];
+
   // Fixed Durations (Standard Anime/Film default 90s, consistent across episodes)
   introDuration: number; // in seconds (default 90s)
   outroDuration: number; // in seconds (default 90s)

@@ -9,7 +9,8 @@ import {
   ABLoopState,
   GeneralPreferences,
   PicturePreset,
-  IntroOutroConfig
+  IntroOutroConfig,
+  IntroOutroPattern,
 } from '../types';
 import { ControlsBar } from './ControlsBar';
 import { VideoSvgFilters } from './VideoSvgFilters';
@@ -21,6 +22,8 @@ import {
   getTrackKey,
   collectScanPriors,
   attachLearnedSignatures,
+  getIntroPatterns,
+  getOutroPatterns,
 } from '../utils/introOutroStorage';
 import { scanVideoForIntroOutro } from '../utils/videoScanner';
 import { Play, UploadCloud, Film, Activity, Check, RotateCcw, X, FastForward, Loader2 } from 'lucide-react';
@@ -154,6 +157,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const autoScanKeyRef = useRef('');
   const metadataTrackRef = useRef<string | null>(null);
   // Decoded references for the live (while playing) matcher.
+  const preparedIntroPatterns = useRef<{ pattern: IntroOutroPattern; ref: PreparedReference }[]>([]);
+  const preparedOutroPatterns = useRef<{ pattern: IntroOutroPattern; ref: PreparedReference }[]>([]);
   const preparedRefs = useRef<{ intro: PreparedReference | null; outro: PreparedReference | null }>({
     intro: null,
     outro: null,
@@ -182,6 +187,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   const idleTimerRef = useRef<number | null>(null);
   const clickTimeoutRef = useRef<number | null>(null);
+  const [isCursorHidden, setIsCursorHidden] = useState(false);
+  const cursorIdleTimerRef = useRef<number | null>(null);
+  const lastMousePosRef = useRef<{ x: number; y: number } | null>(null);
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+  const autoHideDelayRef = useRef(preferences.autoHideDelay);
+  autoHideDelayRef.current = preferences.autoHideDelay;
 
   // Initialize Web Audio API on video element
   const ensureAudioEngine = useCallback(() => {
@@ -295,12 +307,54 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   };
 
-  // Active Subtitle lookup
+  // Active Subtitle lookup: get ALL cues active simultaneously at this exact timestamp
   const activeSubtitle = currentTrack?.subtitles?.find(s => s.id === activeSubtitleTrackId);
   const effectiveTime = currentTime + subtitleStyle.offsetSeconds;
-  const currentCue: SubtitleCue | undefined = activeSubtitle?.cues?.find(
+  const activeCues: SubtitleCue[] = (activeSubtitle?.cues || []).filter(
     c => effectiveTime >= c.startTime && effectiveTime <= c.endTime
   );
+
+  // Group active cues by position (top, middle, bottom)
+  const topCues: SubtitleCue[] = [];
+  const middleCues: SubtitleCue[] = [];
+  const bottomCues: SubtitleCue[] = [];
+
+  activeCues.forEach(cue => {
+    if (cue.position === 'top') {
+      topCues.push(cue);
+    } else if (cue.position === 'middle') {
+      middleCues.push(cue);
+    } else if (cue.position === 'bottom') {
+      bottomCues.push(cue);
+    } else {
+      // Clean heuristic check for on-screen explanation / signs
+      const trimmed = cue.text.trim();
+      if (
+        (trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+        (trimmed.startsWith('【') && trimmed.endsWith('】')) ||
+        (trimmed.startsWith('［') && trimmed.endsWith('］')) ||
+        /^(?:[([{\s])*(TL|T\/N|Sign|Catatan|Note|Info|Keterangan|Judul):?/i.test(trimmed)
+      ) {
+        topCues.push(cue);
+      } else if (subtitleStyle.position === 'top') {
+        topCues.push(cue);
+      } else if (subtitleStyle.position === 'middle') {
+        middleCues.push(cue);
+      } else {
+        bottomCues.push(cue);
+      }
+    }
+  });
+
+  // Jika ada 2 subtitle simultan (dan belum ada di top): cue pertama di paling atas (top), cue kedua di bawah
+  if (topCues.length === 0 && bottomCues.length >= 2) {
+    const firstCue = bottomCues.shift();
+    if (firstCue) {
+      topCues.push(firstCue);
+    }
+  }
+
+  const currentCue = activeCues[0];
 
   // Professional Full-Resolution Snapshot Capture (PNG/JPEG with Subtitle burn-in)
   const captureSnapshot = useCallback((options?: { format: 'png' | 'jpeg'; includeSubtitles: boolean; copyToClipboard?: boolean }) => {
@@ -330,39 +384,63 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       ctx.drawImage(video, -video.videoWidth / 2, -video.videoHeight / 2);
       ctx.restore();
 
-      // Burn in current subtitle if option enabled
+      // Burn in current subtitles (supports simultaneous parallel top, middle, and bottom cues)
       const includeSubs = options?.includeSubtitles !== undefined ? options.includeSubtitles : true;
-      if (includeSubs && currentCue) {
+      if (includeSubs && activeCues.length > 0) {
         ctx.save();
         const baseFontSize = (canvas.width / 1280) * subtitleStyle.fontSize * 1.5;
         ctx.font = `600 ${baseFontSize}px ${subtitleStyle.fontFamily === 'serif' ? 'serif' : subtitleStyle.fontFamily === 'mono' ? 'monospace' : 'sans-serif'}`;
         ctx.textAlign = 'center';
 
-        const lines = currentCue.text.split('\n');
-        const lineHeight = baseFontSize * 1.3;
-        const totalHeight = lines.length * lineHeight;
-        const subY = subtitleStyle.position === 'top' ? baseFontSize * 2 : canvas.height - totalHeight - 40;
+        const drawCueGroup = (cues: SubtitleCue[], pos: 'top' | 'middle' | 'bottom') => {
+          if (cues.length === 0) return;
+          const lineHeight = baseFontSize * 1.35;
+          const allLines = cues.flatMap(c => c.text.split('\n'));
+          const totalHeight = allLines.length * lineHeight;
+          const scale = canvas.height / 720;
+          const offsetYCanvas = (subtitleStyle.offsetY || 0) * scale;
 
-        lines.forEach((line, i) => {
-          const y = subY + (i + 1) * lineHeight;
-          // Background box
-          if (subtitleStyle.backgroundOpacity > 0) {
-            const metrics = ctx.measureText(line);
-            ctx.fillStyle = `rgba(0, 0, 0, ${subtitleStyle.backgroundOpacity})`;
-            ctx.fillRect(canvas.width / 2 - metrics.width / 2 - 12, y - baseFontSize, metrics.width + 24, lineHeight);
+          let startY = 0;
+          if (pos === 'top') {
+            startY = (20 * scale) + offsetYCanvas;
+          } else if (pos === 'middle') {
+            startY = (canvas.height - totalHeight) / 2;
+          } else {
+            startY = canvas.height - totalHeight - (48 * scale) - offsetYCanvas;
           }
-          // Text Shadow / Outline
-          if (subtitleStyle.textOutline === 'heavy') {
-            ctx.shadowColor = '#000000';
-            ctx.shadowBlur = 10;
-            ctx.strokeStyle = '#000000';
-            ctx.lineWidth = 4;
-            ctx.strokeText(line, canvas.width / 2, y);
-          }
-          // Main Text
-          ctx.fillStyle = subtitleStyle.color;
-          ctx.fillText(line, canvas.width / 2, y);
-        });
+
+          allLines.forEach((line, i) => {
+            const y = startY + (i + 1) * lineHeight;
+            // Background box
+            if (subtitleStyle.backgroundOpacity > 0) {
+              const metrics = ctx.measureText(line);
+              ctx.fillStyle = `rgba(0, 0, 0, ${subtitleStyle.backgroundOpacity})`;
+              ctx.fillRect(canvas.width / 2 - metrics.width / 2 - 14, y - baseFontSize + 2, metrics.width + 28, lineHeight);
+            }
+            // Text Shadow / Outline
+            if (subtitleStyle.textOutline === 'heavy') {
+              ctx.shadowColor = '#000000';
+              ctx.shadowBlur = 10;
+              ctx.strokeStyle = '#000000';
+              ctx.lineWidth = 4;
+              ctx.strokeText(line, canvas.width / 2, y);
+            } else if (subtitleStyle.textOutline === 'medium') {
+              ctx.shadowColor = '#000000';
+              ctx.shadowBlur = 6;
+              ctx.strokeStyle = '#000000';
+              ctx.lineWidth = 2.5;
+              ctx.strokeText(line, canvas.width / 2, y);
+            }
+            // Main Text
+            ctx.fillStyle = subtitleStyle.color;
+            ctx.fillText(line, canvas.width / 2, y);
+          });
+        };
+
+        drawCueGroup(topCues, 'top');
+        drawCueGroup(middleCues, 'middle');
+        drawCueGroup(bottomCues, 'bottom');
+
         ctx.restore();
       }
 
@@ -385,9 +463,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     } catch (err) {
       console.warn('Frame snapshot error:', err);
     }
-  }, [videoSettings, currentTrack, currentTime, currentCue, subtitleStyle]);
+  }, [videoSettings, currentTrack, currentTime, activeCues, topCues, middleCues, bottomCues, subtitleStyle]);
 
-  // Background video scanner function (priority-based; see utils/videoScanner.ts)
+  // Background video scanner function (priority-based; supports multiple intro/outro patterns)
   const runBackgroundScan = useCallback(async (
     track = currentTrack,
     cfg = introOutroConfig,
@@ -395,15 +473,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     force = false
   ) => {
     if (!track || !track.url || !cfg?.enabled) return;
-    const introRef = cfg.introImage || cfg.screenDetection?.introFrame;
-    const outroRef = cfg.outroImage || cfg.screenDetection?.outroFrame;
-    if (!introRef && !outroRef) return;
+
+    const allIntros = getIntroPatterns(cfg);
+    const allOutros = getOutroPatterns(cfg);
+    const candidateIntros = allIntros.filter((p) => p.image || p.signature);
+    const candidateOutros = allOutros.filter((p) => p.image || p.signature);
+
+    if (candidateIntros.length === 0 && candidateOutros.length === 0) return;
 
     // Only look for what this episode doesn't have yet (found OR confirmed missing counts as done).
     const trackKey = getTrackKey(track);
     const cached = cfg.episodeDetections?.[trackKey];
-    const needIntro = !!introRef && (force || (cached?.introStart === undefined && !cached?.introMissing));
-    const needOutro = !!outroRef && (force || (cached?.outroStart === undefined && !cached?.outroMissing));
+    let needIntro = candidateIntros.length > 0 && (force || (cached?.introStart === undefined && !cached?.introMissing));
+    let needOutro = candidateOutros.length > 0 && (force || (cached?.outroStart === undefined && !cached?.outroMissing));
     if (!needIntro && !needOutro) return;
 
     if (scanAbortControllerRef.current) {
@@ -417,71 +499,122 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setScanStatus('Memulai pemindaian intro & outro...');
     setScanSummary(null);
 
-    const priors = collectScanPriors(cfg, trackKey);
-    const introLen = cfg.introDuration || 90;
-    const outroLen = cfg.outroDuration || 90;
+    let foundIntro = !needIntro;
+    let foundOutro = !needOutro;
+    let totalProbes = 0;
+    const startTime = performance.now();
+
+    const introQueue = needIntro ? [...candidateIntros] : [];
+    const outroQueue = needOutro ? [...candidateOutros] : [];
 
     try {
-      const res = await scanVideoForIntroOutro({
-        videoUrl: track.url,
-        duration: vidDuration || track.duration,
-        introImage: needIntro ? introRef : undefined,
-        outroImage: needOutro ? outroRef : undefined,
-        introSignature: cfg.introSignature,
-        outroSignature: cfg.outroSignature,
-        introDuration: introLen,
-        outroDuration: outroLen,
-        introSensitivity: cfg.introSensitivity || 75,
-        outroSensitivity: cfg.outroSensitivity || 75,
-        ...priors,
-        onProgress: (pct, msg) => {
-          if (controller.signal.aborted) return;
-          setScanProgress(pct);
-          setScanStatus(msg);
-        },
-        // Markers become usable the moment they are found, even while the other one is still scanning.
-        onFound: (kind, marker) => {
-          if (controller.signal.aborted) return;
-          if (kind === 'intro') {
-            setDetectedIntro(marker);
-            recordEpisodeDetection(trackKey, cfg.seriesTitle, {
-              introStart: marker.start,
-              introEnd: marker.end,
-              duration: vidDuration,
-            });
-            showSkipToast(`Intro terdeteksi di ${formatTime(marker.start)} (+${introLen}s)`);
-          } else {
-            setDetectedOutro(marker);
-            recordEpisodeDetection(trackKey, cfg.seriesTitle, {
-              outroStart: marker.start,
-              outroEnd: marker.end,
-              duration: vidDuration,
-            });
-            showSkipToast(`Outro terdeteksi di ${formatTime(marker.start)} (+${outroLen}s)`);
-          }
-        },
-        signal: controller.signal,
-      });
+      while ((!foundIntro && introQueue.length > 0) || (!foundOutro && outroQueue.length > 0)) {
+        if (controller.signal.aborted) break;
+
+        const currentIntro = !foundIntro && introQueue.length > 0 ? introQueue.shift() : undefined;
+        const currentOutro = !foundOutro && outroQueue.length > 0 ? outroQueue.shift() : undefined;
+
+        const priors = collectScanPriors(cfg, trackKey, {
+          introId: currentIntro?.id,
+          outroId: currentOutro?.id,
+        });
+        const introLen = currentIntro?.duration || cfg.introDuration || 90;
+        const outroLen = currentOutro?.duration || cfg.outroDuration || 90;
+
+        const res = await scanVideoForIntroOutro({
+          videoUrl: track.url,
+          duration: vidDuration || track.duration,
+          introImage: currentIntro?.image,
+          outroImage: currentOutro?.image,
+          introSignature: currentIntro?.signature,
+          outroSignature: currentOutro?.signature,
+          introDuration: introLen,
+          outroDuration: outroLen,
+          introSensitivity: currentIntro?.sensitivity || cfg.introSensitivity || 75,
+          outroSensitivity: currentOutro?.sensitivity || cfg.outroSensitivity || 75,
+          ...priors,
+          onProgress: (pct, msg) => {
+            if (controller.signal.aborted) return;
+            setScanProgress(pct);
+            const prefix = currentIntro && currentOutro
+              ? `[${currentIntro.label} & ${currentOutro.label}] `
+              : currentIntro
+                ? `[${currentIntro.label}] `
+                : currentOutro
+                  ? `[${currentOutro.label}] `
+                  : '';
+            setScanStatus(`${prefix}${msg}`);
+          },
+          // Markers become usable the moment they are found, even while the other one is still scanning.
+          onFound: (kind, marker) => {
+            if (controller.signal.aborted) return;
+            if (kind === 'intro' && currentIntro) {
+              foundIntro = true;
+              setDetectedIntro(marker);
+              recordEpisodeDetection(trackKey, cfg.seriesTitle, {
+                introStart: marker.start,
+                introEnd: marker.end,
+                introPatternId: currentIntro.id,
+                duration: vidDuration,
+              }, track);
+              showSkipToast(`${currentIntro.label} terdeteksi di ${formatTime(marker.start)} (+${introLen}s)`);
+            } else if (kind === 'outro' && currentOutro) {
+              foundOutro = true;
+              setDetectedOutro(marker);
+              recordEpisodeDetection(trackKey, cfg.seriesTitle, {
+                outroStart: marker.start,
+                outroEnd: marker.end,
+                outroPatternId: currentOutro.id,
+                duration: vidDuration,
+              }, track);
+              showSkipToast(`${currentOutro.label} terdeteksi di ${formatTime(marker.start)} (+${outroLen}s)`);
+            }
+          },
+          signal: controller.signal,
+        });
+
+        if (controller.signal.aborted) break;
+
+        totalProbes += res.probes;
+
+        if (res.introStart !== undefined) {
+          foundIntro = true;
+        }
+        if (res.outroStart !== undefined) {
+          foundOutro = true;
+        }
+
+        if (currentIntro && res.introSignature) {
+          attachLearnedSignatures(trackKey, cfg.seriesTitle, {
+            introSignature: res.introSignature,
+          }, { introId: currentIntro.id }, track);
+        }
+        if (currentOutro && res.outroSignature) {
+          attachLearnedSignatures(trackKey, cfg.seriesTitle, {
+            outroSignature: res.outroSignature,
+          }, { outroId: currentOutro.id }, track);
+        }
+      }
 
       if (controller.signal.aborted) return;
 
-      if (res.introMissing || res.outroMissing) {
+      const elapsedMs = Math.round(performance.now() - startTime);
+      const isIntroMissing = needIntro && !foundIntro;
+      const isOutroMissing = needOutro && !foundOutro;
+
+      if (isIntroMissing || isOutroMissing) {
         recordEpisodeDetection(trackKey, cfg.seriesTitle, {
-          introMissing: res.introMissing,
-          outroMissing: res.outroMissing,
+          introMissing: isIntroMissing,
+          outroMissing: isOutroMissing,
           duration: vidDuration,
-        });
+        }, track);
       }
-      attachLearnedSignatures(trackKey, cfg.seriesTitle, {
-        introSignature: res.introSignature,
-        outroSignature: res.outroSignature,
-      });
 
       setScanSummary({
-        probes: res.probes,
-        elapsedMs: res.elapsedMs,
-        introMissing: !!res.introMissing,
-        outroMissing: !!res.outroMissing,
+        probes: totalProbes,
+        elapsedMs,
+        introMissing: isIntroMissing,
+        outroMissing: isOutroMissing,
       });
     } catch (err: any) {
       if (err?.message !== 'Scan aborted') {
@@ -568,13 +701,39 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   useEffect(() => {
     let cancelled = false;
     const cfg = introOutroConfig;
+    preparedIntroPatterns.current = [];
+    preparedOutroPatterns.current = [];
     preparedRefs.current = { intro: null, outro: null };
     if (!cfg) return;
+
+    const intros = getIntroPatterns(cfg).filter((p) => p.image || p.signature);
+    const outros = getOutroPatterns(cfg).filter((p) => p.image || p.signature);
+
     Promise.all([
-      prepareReference(cfg.introImage || cfg.screenDetection?.introFrame, cfg.introSignature),
-      prepareReference(cfg.outroImage || cfg.screenDetection?.outroFrame, cfg.outroSignature),
-    ]).then(([intro, outro]) => {
-      if (!cancelled) preparedRefs.current = { intro, outro };
+      Promise.all(
+        intros.map(async (p) => ({
+          pattern: p,
+          ref: await prepareReference(p.image, p.signature),
+        }))
+      ),
+      Promise.all(
+        outros.map(async (p) => ({
+          pattern: p,
+          ref: await prepareReference(p.image, p.signature),
+        }))
+      ),
+    ]).then(([decodedIntros, decodedOutros]) => {
+      if (cancelled) return;
+      preparedIntroPatterns.current = decodedIntros.filter(
+        (x): x is { pattern: IntroOutroPattern; ref: PreparedReference } => x.ref !== null
+      );
+      preparedOutroPatterns.current = decodedOutros.filter(
+        (x): x is { pattern: IntroOutroPattern; ref: PreparedReference } => x.ref !== null
+      );
+      preparedRefs.current = {
+        intro: preparedIntroPatterns.current[0]?.ref || null,
+        outro: preparedOutroPatterns.current[0]?.ref || null,
+      };
     });
     return () => {
       cancelled = true;
@@ -585,6 +744,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     introOutroConfig?.outroImage,
     introOutroConfig?.introSignature,
     introOutroConfig?.outroSignature,
+    introOutroConfig?.intros,
+    introOutroConfig?.outros,
   ]);
 
   // Auto-save playback position and check resume
@@ -853,66 +1014,74 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const totalDur = duration || video.duration || 1440;
       const { intro: introRef, outro: outroRef } = preparedRefs.current;
 
-      if (introRef && !detectedIntro && !cached?.introMissing && t < Math.max(totalDur * 0.7, 720)) {
-        const sensitivity = introOutroConfig.introSensitivity || 75;
-        const m = matchVideoFrame(video, introRef);
-        if (m && m.score >= sensitivity) {
-          const len = introOutroConfig.introDuration || 90;
-          const start = Math.max(0, Math.floor(t - m.offset));
-          const end = Math.min(totalDur, start + len);
-          setDetectedIntro({ start, end });
-          setVisualIntroMatched(true);
-          showSkipToast(`Intro terdeteksi di ${formatTime(start)} (+${len}s)`);
+      if (preparedIntroPatterns.current.length > 0 && !detectedIntro && !cached?.introMissing && t < Math.max(totalDur * 0.7, 720)) {
+        for (const item of preparedIntroPatterns.current) {
+          const sensitivity = item.pattern.sensitivity || 75;
+          const m = matchVideoFrame(video, item.ref);
+          if (m && m.score >= sensitivity) {
+            const len = item.pattern.duration || 90;
+            const start = Math.max(0, Math.floor(t - m.offset));
+            const end = Math.min(totalDur, start + len);
+            setDetectedIntro({ start, end });
+            setVisualIntroMatched(true);
+            showSkipToast(`${item.pattern.label || 'Intro'} terdeteksi di ${formatTime(start)} (+${len}s)`);
 
-          if (currentTrack) {
-            recordEpisodeDetection(getTrackKey(currentTrack), introOutroConfig.seriesTitle, {
-              introStart: start,
-              introEnd: end,
-              duration: totalDur,
-            });
-          }
+            if (currentTrack) {
+              recordEpisodeDetection(getTrackKey(currentTrack), introOutroConfig.seriesTitle, {
+                introStart: start,
+                introEnd: end,
+                introPatternId: item.pattern.id,
+                duration: totalDur,
+              }, currentTrack);
+            }
 
-          if (introOutroConfig.autoSkipIntro && !autoSkippedIntroRef.current) {
-            autoSkippedIntroRef.current = true;
-            seek(end);
+            if (introOutroConfig.autoSkipIntro && !autoSkippedIntroRef.current) {
+              autoSkippedIntroRef.current = true;
+              seek(end);
+            }
+            break;
           }
         }
       }
 
-      if (outroRef && !detectedOutro && !cached?.outroMissing && t > totalDur * 0.3) {
-        const sensitivity = introOutroConfig.outroSensitivity || 75;
-        const m = matchVideoFrame(video, outroRef);
-        if (m && m.score >= sensitivity) {
-          const len = introOutroConfig.outroDuration || 90;
-          const start = Math.max(0, Math.floor(t - m.offset));
-          const end = Math.min(totalDur, start + len);
-          setDetectedOutro({ start, end });
-          setVisualOutroMatched(true);
+      if (preparedOutroPatterns.current.length > 0 && !detectedOutro && !cached?.outroMissing && t > totalDur * 0.3) {
+        for (const item of preparedOutroPatterns.current) {
+          const sensitivity = item.pattern.sensitivity || 75;
+          const m = matchVideoFrame(video, item.ref);
+          if (m && m.score >= sensitivity) {
+            const len = item.pattern.duration || 90;
+            const start = Math.max(0, Math.floor(t - m.offset));
+            const end = Math.min(totalDur, start + len);
+            setDetectedOutro({ start, end });
+            setVisualOutroMatched(true);
 
-          const hasAfter = end < totalDur - 10;
-          showSkipToast(
-            hasAfter
-              ? `Outro terdeteksi di ${formatTime(start)} (ada after-film di ${formatTime(end)})`
-              : `Outro terdeteksi di ${formatTime(start)}`
-          );
+            const hasAfter = end < totalDur - 10;
+            showSkipToast(
+              hasAfter
+                ? `${item.pattern.label || 'Outro'} terdeteksi di ${formatTime(start)} (ada after-film di ${formatTime(end)})`
+                : `${item.pattern.label || 'Outro'} terdeteksi di ${formatTime(start)}`
+            );
 
-          if (currentTrack) {
-            recordEpisodeDetection(getTrackKey(currentTrack), introOutroConfig.seriesTitle, {
-              outroStart: start,
-              outroEnd: end,
-              duration: totalDur,
-            });
-          }
-
-          if (introOutroConfig.autoSkipOutro && !autoSkippedOutroRef.current) {
-            autoSkippedOutroRef.current = true;
-            if (hasAfter) {
-              seek(end);
-            } else if (currentIndex < playlist.length - 1) {
-              onSelectTrack(currentIndex + 1);
-            } else {
-              seek(end);
+            if (currentTrack) {
+              recordEpisodeDetection(getTrackKey(currentTrack), introOutroConfig.seriesTitle, {
+                outroStart: start,
+                outroEnd: end,
+                outroPatternId: item.pattern.id,
+                duration: totalDur,
+              }, currentTrack);
             }
+
+            if (introOutroConfig.autoSkipOutro && !autoSkippedOutroRef.current) {
+              autoSkippedOutroRef.current = true;
+              if (hasAfter) {
+                seek(end);
+              } else if (currentIndex < playlist.length - 1) {
+                onSelectTrack(currentIndex + 1);
+              } else {
+                seek(end);
+              }
+            }
+            break;
           }
         }
       }
@@ -1143,6 +1312,81 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return () => document.removeEventListener('fullscreenchange', handleFs);
   }, []);
 
+  // Fullscreen cursor auto-hide after 3 seconds of inactivity, reappearing on movement
+  useEffect(() => {
+    if (!isFullscreen) {
+      setIsCursorHidden(false);
+      lastMousePosRef.current = null;
+      if (cursorIdleTimerRef.current) {
+        clearTimeout(cursorIdleTimerRef.current);
+        cursorIdleTimerRef.current = null;
+      }
+      return;
+    }
+
+    // Entering fullscreen: ensure cursor is initially visible and schedule 3s idle hide
+    setIsCursorHidden(false);
+
+    const startCursorIdleTimer = () => {
+      if (cursorIdleTimerRef.current) {
+        clearTimeout(cursorIdleTimerRef.current);
+      }
+      cursorIdleTimerRef.current = window.setTimeout(() => {
+        setIsCursorHidden(true);
+        if (isPlayingRef.current) {
+          setShowControls(false);
+        }
+      }, 3000);
+    };
+
+    const handleFullscreenActivity = (e?: MouseEvent) => {
+      if (e && e.type === 'mousemove') {
+        // Prevent synthetic mousemove events from waking the cursor if coordinates haven't changed
+        if (
+          lastMousePosRef.current &&
+          lastMousePosRef.current.x === e.clientX &&
+          lastMousePosRef.current.y === e.clientY
+        ) {
+          return;
+        }
+        lastMousePosRef.current = { x: e.clientX, y: e.clientY };
+      } else if (e) {
+        lastMousePosRef.current = { x: e.clientX, y: e.clientY };
+      }
+
+      setIsCursorHidden(false);
+      setShowControls(true);
+
+      if (idleTimerRef.current) {
+        clearTimeout(idleTimerRef.current);
+      }
+      if (isPlayingRef.current && autoHideDelayRef.current > 0) {
+        idleTimerRef.current = window.setTimeout(() => {
+          setShowControls(false);
+        }, autoHideDelayRef.current);
+      }
+
+      startCursorIdleTimer();
+    };
+
+    // Initialize 3-second timer upon entering fullscreen
+    startCursorIdleTimer();
+
+    window.addEventListener('mousemove', handleFullscreenActivity, { passive: true });
+    window.addEventListener('mousedown', handleFullscreenActivity, { passive: true });
+
+    return () => {
+      window.removeEventListener('mousemove', handleFullscreenActivity);
+      window.removeEventListener('mousedown', handleFullscreenActivity);
+      if (cursorIdleTimerRef.current) {
+        clearTimeout(cursorIdleTimerRef.current);
+        cursorIdleTimerRef.current = null;
+      }
+      setIsCursorHidden(false);
+      lastMousePosRef.current = null;
+    };
+  }, [isFullscreen]);
+
   // Drag and Drop
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -1272,7 +1516,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       onDrop={handleDrop}
       className={`relative w-full h-full flex flex-col items-center justify-center bg-black overflow-hidden select-none group ${
         isFullscreen ? 'fixed inset-0 z-50' : 'min-h-[460px] lg:min-h-[580px] rounded-2xl border border-cyan-950/40 shadow-2xl shadow-cyan-950/30'
-      }`}
+      } ${isFullscreen && isCursorHidden ? 'hide-cursor' : ''}`}
+      style={{
+        cursor: isFullscreen && isCursorHidden ? 'none' : undefined,
+      }}
     >
       {/* SVG Convolution & Gamma Filters Definition */}
       <VideoSvgFilters gamma={videoSettings.gamma} />
@@ -1381,41 +1628,123 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       )}
 
-      {/* Subtitles Overlay */}
-      {currentCue && (
+      {/* Subtitles Overlay - Top Subtitles (e.g. video signs, on-screen text, translations) */}
+      {topCues.length > 0 && (
         <div
-          className={`absolute left-0 right-0 z-20 flex justify-center px-6 pointer-events-none transition-all duration-150 ${
-            subtitleStyle.position === 'top'
-              ? 'top-10'
-              : subtitleStyle.position === 'middle'
-              ? 'top-1/2 -translate-y-1/2'
-              : showControls
-              ? 'bottom-24'
-              : 'bottom-10'
-          }`}
+          className="absolute left-0 right-0 z-20 flex flex-col items-center gap-2 px-6 pointer-events-none transition-all duration-150"
+          style={{
+            top: `calc(1.25rem + ${subtitleStyle.offsetY || 0}px)`,
+          }}
         >
-          <div
-            style={{
-              fontSize: `${subtitleStyle.fontSize}px`,
-              color: subtitleStyle.color,
-              fontFamily: subtitleStyle.fontFamily === 'serif' ? 'serif' : subtitleStyle.fontFamily === 'mono' ? 'monospace' : 'sans-serif',
-              backgroundColor:
-                subtitleStyle.backgroundColor === 'transparent'
-                  ? 'transparent'
-                  : `rgba(0, 0, 0, ${subtitleStyle.backgroundOpacity})`,
-              textShadow:
-                subtitleStyle.textOutline === 'heavy'
-                  ? '0 2px 6px rgba(0,0,0,0.95), 0 0 6px #000, 0 0 4px #000'
-                  : subtitleStyle.textOutline === 'medium'
-                  ? '0 1px 3px rgba(0,0,0,0.9), 0 0 3px #000'
-                  : subtitleStyle.textShadow
-                  ? '0 1px 2px rgba(0,0,0,0.8)'
-                  : 'none',
-            }}
-            className="px-4 py-1.5 rounded-lg text-center font-medium max-w-[90%] leading-snug whitespace-pre-line backdrop-blur-[2px]"
-          >
-            {currentCue.text}
-          </div>
+          {topCues.map((cue) => (
+            <div
+              key={cue.id}
+              style={{
+                fontSize: `${Math.max(16, subtitleStyle.fontSize * 0.92)}px`,
+                color: subtitleStyle.color,
+                fontFamily:
+                  subtitleStyle.fontFamily === 'serif'
+                    ? 'serif'
+                    : subtitleStyle.fontFamily === 'mono'
+                    ? 'monospace'
+                    : 'sans-serif',
+                backgroundColor:
+                  subtitleStyle.backgroundColor === 'transparent'
+                    ? 'transparent'
+                    : `rgba(0, 0, 0, ${subtitleStyle.backgroundOpacity})`,
+                textShadow:
+                  subtitleStyle.textOutline === 'heavy'
+                    ? '0 2px 6px rgba(0,0,0,0.95), 0 0 6px #000, 0 0 4px #000'
+                    : subtitleStyle.textOutline === 'medium'
+                    ? '0 1px 3px rgba(0,0,0,0.9), 0 0 3px #000'
+                    : subtitleStyle.textShadow
+                    ? '0 1px 2px rgba(0,0,0,0.8)'
+                    : 'none',
+              }}
+              className="px-4 py-2 rounded-xl text-center font-medium max-w-[90%] leading-snug whitespace-pre-line backdrop-blur-[3px] border border-white/10 shadow-lg"
+            >
+              {cue.text}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Subtitles Overlay - Middle Subtitles */}
+      {middleCues.length > 0 && (
+        <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-2 px-6 pointer-events-none transition-all duration-150">
+          {middleCues.map((cue) => (
+            <div
+              key={cue.id}
+              style={{
+                fontSize: `${subtitleStyle.fontSize}px`,
+                color: subtitleStyle.color,
+                fontFamily:
+                  subtitleStyle.fontFamily === 'serif'
+                    ? 'serif'
+                    : subtitleStyle.fontFamily === 'mono'
+                    ? 'monospace'
+                    : 'sans-serif',
+                backgroundColor:
+                  subtitleStyle.backgroundColor === 'transparent'
+                    ? 'transparent'
+                    : `rgba(0, 0, 0, ${subtitleStyle.backgroundOpacity})`,
+                textShadow:
+                  subtitleStyle.textOutline === 'heavy'
+                    ? '0 2px 6px rgba(0,0,0,0.95), 0 0 6px #000, 0 0 4px #000'
+                    : subtitleStyle.textOutline === 'medium'
+                    ? '0 1px 3px rgba(0,0,0,0.9), 0 0 3px #000'
+                    : subtitleStyle.textShadow
+                    ? '0 1px 2px rgba(0,0,0,0.8)'
+                    : 'none',
+              }}
+              className="px-5 py-2.5 rounded-xl text-center font-medium max-w-[90%] leading-snug whitespace-pre-line backdrop-blur-[3px] shadow-lg"
+            >
+              {cue.text}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Subtitles Overlay - Bottom Subtitles (e.g. dialogue, spoken audio translations) with comfortable bottom padding */}
+      {bottomCues.length > 0 && (
+        <div
+          className="absolute left-0 right-0 z-20 flex flex-col items-center gap-2 px-6 pointer-events-none transition-all duration-150"
+          style={{
+            bottom: showControls
+              ? `calc(6.5rem + ${subtitleStyle.offsetY || 0}px)`
+              : `calc(3.5rem + ${subtitleStyle.offsetY || 0}px)`,
+          }}
+        >
+          {bottomCues.map((cue) => (
+            <div
+              key={cue.id}
+              style={{
+                fontSize: `${subtitleStyle.fontSize}px`,
+                color: subtitleStyle.color,
+                fontFamily:
+                  subtitleStyle.fontFamily === 'serif'
+                    ? 'serif'
+                    : subtitleStyle.fontFamily === 'mono'
+                    ? 'monospace'
+                    : 'sans-serif',
+                backgroundColor:
+                  subtitleStyle.backgroundColor === 'transparent'
+                    ? 'transparent'
+                    : `rgba(0, 0, 0, ${subtitleStyle.backgroundOpacity})`,
+                textShadow:
+                  subtitleStyle.textOutline === 'heavy'
+                    ? '0 2px 6px rgba(0,0,0,0.95), 0 0 6px #000, 0 0 4px #000'
+                    : subtitleStyle.textOutline === 'medium'
+                    ? '0 1px 3px rgba(0,0,0,0.9), 0 0 3px #000'
+                    : subtitleStyle.textShadow
+                    ? '0 1px 2px rgba(0,0,0,0.8)'
+                    : 'none',
+              }}
+              className="px-5 py-2.5 rounded-xl text-center font-medium max-w-[90%] leading-snug whitespace-pre-line backdrop-blur-[3px] shadow-lg"
+            >
+              {cue.text}
+            </div>
+          ))}
         </div>
       )}
 

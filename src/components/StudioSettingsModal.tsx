@@ -1758,6 +1758,46 @@ export const StudioSettingsModal: React.FC<StudioSettingsModalProps> = ({
                   </div>
                 </div>
 
+                {/* Bottom Padding / Offset Y */}
+                <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-slate-300 font-medium">Jarak Bawah / Bottom Padding (Offset Y)</span>
+                    <span className="font-mono text-cyan-400 font-bold">+{subtitleStyle.offsetY || 0}px</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="2"
+                    value={subtitleStyle.offsetY || 0}
+                    onChange={(e) => setSubtitleStyle(prev => ({ ...prev, offsetY: parseInt(e.target.value, 10) }))}
+                    className="w-full accent-cyan-400 h-2 bg-slate-800 rounded-lg cursor-pointer"
+                  />
+                  <div className="flex gap-1.5">
+                    {[
+                      { label: '0px', val: 0 },
+                      { label: '20px (Default)', val: 20 },
+                      { label: '40px', val: 40 },
+                      { label: '70px', val: 70 },
+                    ].map(p => (
+                      <button
+                        key={p.val}
+                        onClick={() => setSubtitleStyle(prev => ({ ...prev, offsetY: p.val }))}
+                        className={`flex-1 py-1 text-[11px] rounded border transition ${
+                          (subtitleStyle.offsetY || 0) === p.val
+                            ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/60 font-semibold'
+                            : 'bg-slate-800/80 text-slate-400 border-slate-700/60 hover:text-white'
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-slate-400">
+                    Menjaga jarak subtitle bawah dari garis tepi layar atau bilah kontrol video.
+                  </p>
+                </div>
+
               </div>
 
               {/* Subtitle Live Preview Box */}
